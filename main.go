@@ -7,15 +7,16 @@ import (
     "log"
 	"net/http"
 	"time"
+	"bytes"
 
 	"github.com/gorilla/mux"
 	"github.com/tkanos/gonfig"
 )
 
 var client *http.Client
+var hostIp string
 
-
-func loadConfig() Configuration {
+func LoadConfig() Configuration {
 	env := os.Getenv("ENV")
 	if len(env) == 0 {
 		env = "development"
@@ -23,9 +24,12 @@ func loadConfig() Configuration {
 
 	configuration := Configuration{}
 	var err error
+
+	// Load the configuration file based on the environment.
 	if(env == "development") {
 		err = gonfig.GetConf("config/config.development.json", &configuration)
 	} else {
+		// This is the path where a config file can be mounted.
 		err = gonfig.GetConf("/config/config.json", &configuration)
 	}
 
@@ -39,7 +43,11 @@ func loadConfig() Configuration {
 
 func main() {
 	// Load the config from file and ENV variables.
-	configuration := loadConfig()
+	configuration := LoadConfig()
+	hostIp = os.Getenv("HOST_IP")
+	if len(hostIp) == 0 {
+		hostIp = "0.0.0.0"
+	}
 
 	router := mux.NewRouter().StrictSlash(true)
 	client = &http.Client{}
@@ -52,10 +60,23 @@ func main() {
 			fmt.Println("Endpoint called:", currentEndpoint.Endpoint)
 			ch := make(chan bool)
 
+			// Read the content
+			var bodyBytes []byte
+			if r.Body != nil {
+				bodyBytes, _ = ioutil.ReadAll(r.Body)
+			}
+
 			// Split the request.
 			for _, element := range currentEndpoint.Redirects {
+
+				// Check if the method has an override.
+				method := r.Method
+				if len(element.Method) != 0 {
+					method = element.Method
+				}
+
 				// Run the upstream requests in parallel.
-				go MakeRequest(element.URL, currentEndpoint.Endpoint, ch)
+				go MakeRequest(element.URL, currentEndpoint.Endpoint, method, r, bodyBytes, ch)
 			}
 
 			// Wait for the upstream requests and check for success.
@@ -72,7 +93,6 @@ func main() {
 			} else {
 				w.WriteHeader(http.StatusMultiStatus)
 			}
-
 		})
 	}
 
@@ -81,17 +101,30 @@ func main() {
 }
 
 // MakeRequest makes the request to the upstream endpoint.
-func MakeRequest(url string, forwardedEndpoint string, ch chan<-bool) {
+func MakeRequest(url string, forwardedEndpoint string, method string, r *http.Request, bodyBytes []byte, ch chan<-bool) {
 	start := time.Now()
-	
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Add("X-Forwarded-For", forwardedEndpoint)
+
+	fmt.Println("-->", method, url)
+
+	// Create a new request. Forward the body, if set.
+	reader := bytes.NewReader(bodyBytes)
+	req, _ := http.NewRequest(method, url, reader)
+
+	// Set the forwarded headers.
+	req.Header.Add("X-Forwarded-For", hostIp)
+	req.Header.Add("X-Forwarded-Url", forwardedEndpoint)
+
+	// Add the original headers.
+	for k, v := range r.Header {
+		req.Header.Add(k, v[0])
+	}
+	// Make the request.
 	resp, err := client.Do(req)
   
 	secs := time.Since(start).Seconds()
 
 	if err != nil {
-		// Handle errors..
+		// Handle errors.
 		fmt.Println("Redirect failure:", err)
 
 		ch <- false

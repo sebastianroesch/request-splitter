@@ -11,5 +11,6 @@ type EndpointConfig struct {
 }
 
 type RedirectConfig struct {
-	URL  string
+	URL    string
+	Method string
 }
